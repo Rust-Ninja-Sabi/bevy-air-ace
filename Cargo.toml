@@ -11,3 +11,5 @@ bevy_atmosphere = "0.4"
 lerp = "0.4"
 bevy_rapier3d = { version = "*", features = [ "simd-stable", "debug-render" ] }
 rand = "*"
+
+
