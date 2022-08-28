@@ -11,7 +11,6 @@ card_hearts_10
 card_hearts_J
 card_hearts_Q
 card_hearts_K
-card_empty
 card_diamonds_A
 card_diamonds_02
 card_diamonds_03
@@ -25,7 +24,6 @@ card_diamonds_10
 card_diamonds_J
 card_diamonds_Q
 card_diamonds_K
-card_back
 card_clubs_A
 card_clubs_02
 card_clubs_03
@@ -39,7 +37,6 @@ card_clubs_10
 card_clubs_J
 card_clubs_Q
 card_clubs_K
-card_joker_red
 card_spades_A
 card_spades_02
 card_spades_03
@@ -53,4 +50,3 @@ card_spades_10
 card_spades_J
 card_spades_Q
 card_spades_K
-card_joker_black
