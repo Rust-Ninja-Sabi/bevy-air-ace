@@ -1,20 +1,27 @@
-use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::time::Duration;
 use bevy::prelude::*;
-use bevy::time::{FixedTimestep, Stopwatch};
+use bevy::window::{WindowResolution,PresentMode};
+use bevy::time::Stopwatch;
+use bevy::time::common_conditions::on_timer;
 use bevy::input::keyboard::KeyboardInput;
-use bevy_atmosphere::prelude::*;
+use bevy::pbr::NotShadowReceiver;
 use bevy_rapier3d::prelude::*;
-use lerp::Lerp;
+use bevy_mod_raycast::{RaycastMesh,RaycastSystem,DefaultRaycastingPlugin,DefaultPluginState,
+                       RaycastSource, RaycastMethod};
 use rand::Rng;
 
-#[derive(Clone, Eq, PartialEq, Debug, Hash)]
+#[derive(Debug, Clone, Default, Copy, Eq, PartialEq, Hash, States)]
 enum GameState {
+    #[default]
     GameStart,
     Playing,
     GameOver,
 }
 
+#[derive(Clone, Reflect)]
+struct MyRaycastSet;
+
+#[derive(Resource)]
 struct Score {
     best:f32,
     next:String,
@@ -36,26 +43,6 @@ struct Ship;
 
 #[derive(Component)]
 struct Camera;
-
-#[derive(Component)]
-struct SimpleFly{
-    yaw:f32,
-    pitch:f32,
-    current_horizontal:f32,
-    current_vertical:f32,
-    follow:f32
-}
-impl Default for SimpleFly {
-    fn default() -> Self {
-        Self {
-            yaw: 0.0,
-            pitch: 0.0,
-            current_horizontal: 0.0,
-            current_vertical: 0.0,
-            follow: 1.6
-        }
-    }
-}
 
 #[derive(Component)]
 struct Laser;
@@ -96,7 +83,11 @@ struct EffectTime {
 
 struct CreateEffectEvent(Vec3);
 
+struct CreateLaserEvent;
+
 const GAMEOVER:usize =  13;
+
+#[derive(Resource)]
 struct Stack {
     cards: Vec<String>,
     texts: Vec<String>,
@@ -115,34 +106,81 @@ impl Default for Stack {
     }
 }
 
+const ALL_CARDS:&str = "card_hearts_A,card_hearts_02,card_hearts_03,card_hearts_04,card_hearts_05,card_hearts_06,card_hearts_07,card_hearts_08,
+card_hearts_09,\
+card_hearts_10,\
+card_hearts_J,\
+card_hearts_Q,\
+card_hearts_K,\
+card_diamonds_A,\
+card_diamonds_02,\
+card_diamonds_03,\
+card_diamonds_04,\
+card_diamonds_05,\
+card_diamonds_06,\
+card_diamonds_07,\
+card_diamonds_08,\
+card_diamonds_09,\
+card_diamonds_10,\
+card_diamonds_J,\
+card_diamonds_Q,\
+card_diamonds_K,\
+card_clubs_A,\
+card_clubs_02,\
+card_clubs_03,\
+card_clubs_04,\
+card_clubs_05,\
+card_clubs_06,\
+card_clubs_07,\
+card_clubs_08,\
+card_clubs_09,\
+card_clubs_10,\
+card_clubs_J,\
+card_clubs_Q,\
+card_clubs_K,\
+card_spades_A,\
+card_spades_02,\
+card_spades_03,\
+card_spades_04,\
+card_spades_05,\
+card_spades_06,\
+card_spades_07,\
+card_spades_08,\
+card_spades_09,\
+card_spades_10,\
+card_spades_J,\
+card_spades_Q,\
+card_spades_K";
+
+#[derive(Resource)]
 struct Talon {
     cards: Vec<String>
 }
 
 impl Default for Talon {
     fn default() -> Self {
-        Self::new("assets/cards/_cards.csv".to_string())
+        Self::new()
     }
 }
 
 impl Talon {
-    fn new(file_name: String) -> Self {
-        let f = File::open(file_name).unwrap();
-        let reader = BufReader::new(f);
-        let mut l: Vec<String> = vec![];
-        for line in reader.lines() {
-            l.push(line.unwrap())
-        };
+    fn new() -> Self {
+        let mut l:Vec<String>=vec![];
+        for s in ALL_CARDS.split(","){
+             l.push(s.to_string());
+        }
         Self {
             cards:l
         }
     }
 }
 
+#[derive(Resource)]
 struct CountLaser{
     value:i32
 }
 
+#[derive(Resource)]
 struct NextCardPosition{
     position:Vec3
 }
@@ -154,88 +192,74 @@ const SHIP_POSTION: Vec3 = Vec3::new(0.0, -1.0, -8.0);
 fn main() {
     App::new()
         //add config resources
-        .insert_resource(Msaa {samples: 4})
-        .insert_resource(WindowDescriptor{
-            title: "bevy air ace".to_string(),
-            width: 800.0,
-            height: 600.0,
-            ..Default::default()
-        })
+        .insert_resource(Msaa::Sample4)
         .insert_resource(ClearColor(Color::MIDNIGHT_BLUE))
         .insert_resource(Score::default())
         .add_event::<CreateEffectEvent>()
-        //bevy itself
-        .add_plugins(DefaultPlugins)
-        .add_plugin(AtmospherePlugin)
+        .add_event::<CreateLaserEvent>()
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "bevy air ace".to_string(),
+                present_mode: PresentMode::AutoNoVsync, // Reduces input lag.
+                resolution: WindowResolution::new(920.0, 640.0),
+                ..default()
+            }),
+            ..default()
+        }))
+        //.add_plugin(AtmospherePlugin)
         .add_plugin(RapierPhysicsPlugin::<NoUserData>::default())
         .add_plugin(RapierDebugRenderPlugin::default())
+        .add_plugin(DefaultRaycastingPlugin::<MyRaycastSet>::default())
         .add_startup_system(setup_camera)
-        .add_state(GameState::GameStart)
-        .add_system_set(
-            SystemSet::on_enter(GameState::GameStart)
-                .with_system(setup)
+        .add_system(
+            update_raycast_with_cursor
+                .in_base_set(CoreSet::First)
+                .before(RaycastSystem::BuildRays::<MyRaycastSet>),
         )
-        .add_system_set(
-            SystemSet::on_update(GameState::GameStart)
-                .with_system(any_key_pressed)
-        )
-        .add_system_set(
-            SystemSet::on_exit(GameState::GameStart)
-                .with_system(exit_start)
-        )
-        .add_system_set(
-            SystemSet::on_enter(GameState::Playing)
-                .with_system(setup_playing)
-        )
-        .add_system_set(
-            SystemSet::on_update(GameState::Playing)
-                        .with_system(fly_simple)
-                        .with_system(spawn_laser)
-                        .with_system(moving)
-                        .with_system(create_effect)
-                        .with_system(remove_effect)
-                        .with_system(collision)
-                        .with_system(scoreboard)
-                        .with_system(despawn_card)
-        )
-        .add_system_set(
-            SystemSet::on_update(GameState::Playing)
-                .with_run_criteria(FixedTimestep::step(2.0))
-                .with_system(spawn_card)
-        )
-        .add_system_set(
-            SystemSet::on_enter(GameState::GameOver)
-                .with_system(setup_gameover)
-        )
-        .add_system_set(
-            SystemSet::on_update(GameState::GameOver)
-                .with_system(any_key_pressed_gameover)
-        )
-        .add_system_set(
-            SystemSet::on_exit(GameState::GameOver)
-                .with_system(exit_gameover)
-        )
+        .add_state::<GameState>()
+        .add_system(setup.in_schedule(OnEnter(GameState::GameStart)))
+        .add_system(any_key_pressed.in_set(OnUpdate(GameState::GameStart)))
+        .add_system(exit_start.in_schedule(OnExit(GameState::GameStart)))
+        .add_system(setup_playing.in_schedule(OnEnter(GameState::Playing)))
+        .add_systems((spawn_laser,
+                      moving,
+                      create_effect,
+                      remove_effect,
+                      collision,
+                      scoreboard,
+                      despawn_card,
+                      mouse_button_input).in_set(OnUpdate(GameState::Playing)))
+        .add_system(spawn_card
+                        .in_set(OnUpdate(GameState::Playing))
+                        .run_if(on_timer(Duration::from_secs_f32(2.0))))
+        .add_system(setup_gameover.in_schedule(OnEnter(GameState::GameOver)))
+        .add_system(any_key_pressed_gameover.in_set(OnUpdate(GameState::GameOver)))
+        .add_system(exit_gameover.in_schedule(OnExit(GameState::GameOver)))
         .run();
 }
 
 fn setup_camera(
     mut commands: Commands
 ) {
+    commands.insert_resource(DefaultPluginState::<MyRaycastSet>::default().with_debug_cursor());
+
     commands.
-        spawn_bundle(Camera3dBundle {
+        spawn(Camera3dBundle {
             transform: Transform::from_xyz(0.0, 1.0, 0.0).looking_at(SHIP_POSTION.clone()+Vec3::new(0.0,1.0,0.0), Vec3::Y),
             ..Default::default()
         })
-        .insert(AtmosphereCamera(None))
         .insert(UiCameraConfig {
             show_ui: true,
             ..default()
         })
+        .insert(RaycastSource::<MyRaycastSet>::new())
         .insert(Camera{});
 }
 
 fn setup(
     mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
     asset_server: Res<AssetServer>,
 ) {
     commands.insert_resource(CountLaser{value:0});
@@ -244,7 +268,7 @@ fn setup(
     commands.insert_resource(Stack::default());
 
     //light
-    commands.spawn_bundle(DirectionalLightBundle {
+    commands.spawn(DirectionalLightBundle {
         directional_light: DirectionalLight {
             shadows_enabled: true,
             ..default()
@@ -257,25 +281,35 @@ fn setup(
         ..default()
     });
 
+    //whiteboard
+    commands
+        .spawn(PbrBundle {
+            mesh: meshes.add(Mesh::from(shape::Box::new(40.0,32.0,1.0))),
+            material: materials.add(Color::rgb(0.9, 0.9, 1.0).into()),
+            transform: Transform::from_xyz(0.0,0.0,-30.0),
+            ..Default::default()
+        })
+        .insert(NotShadowReceiver)
+        .insert(RaycastMesh::<MyRaycastSet>::default()); // Make this mesh ray cast-able
+
     //ship
 
-    commands.spawn_bundle(SceneBundle {
+    commands.spawn(SceneBundle {
         scene: asset_server.load("models/ship1.glb#Scene0"),
         transform:Transform::from_translation(SHIP_POSTION.clone()),
         ..Default::default()
     })
-        .insert(Ship{})
-        .insert(SimpleFly::default());
+        .insert(Ship{});
 
     // Start
-    commands.spawn_bundle(TextBundle {
+    commands.spawn(TextBundle {
         text: Text::from_section(
             " Bevy Air Ace \n \
                     \n \
                     by sabi@nelson-games.de \n \
                     \n \
-                    control ship with arrow keys \n \
-                    fire with space \n \
+                    control ship with mouse \n \
+                    fire with click \n \
                     \n \
                     press any key to start",
             TextStyle {
@@ -308,7 +342,7 @@ fn setup_playing(
     score.time.reset();
 
     // scoreboard
-    commands.spawn_bundle(TextBundle {
+    commands.spawn(TextBundle {
         text: Text::from_section(
             "Best:",
             TextStyle {
@@ -330,7 +364,7 @@ fn setup_playing(
     })
         .insert(Besttext);
 
-    commands.spawn_bundle(TextBundle {
+    commands.spawn(TextBundle {
         text: Text::from_section(
             "Next Card:",
             TextStyle {
@@ -352,7 +386,7 @@ fn setup_playing(
     })
         .insert(NextCardtext);
 
-    commands.spawn_bundle(TextBundle {
+    commands.spawn(TextBundle {
         text: Text::from_section(
             "Time:",
             TextStyle {
@@ -376,65 +410,22 @@ fn setup_playing(
 }
 
 
-fn fly_simple(
-    time:Res<Time>,
-    keyboard_input:Res<Input<KeyCode>>,
-    mut query: Query<(&mut Transform, &mut SimpleFly)>
-)
-{
-    let  yaw_amount = 1.0;
-    let  pitch_amount = 1.0;
-
-    for (mut transform,mut simple_fly) in query.iter_mut() {
-        let mut horizontal = if keyboard_input.pressed(KeyCode::Left) {
-            1.
-        } else if keyboard_input.pressed(KeyCode::Right) {
-            -1.
-        } else {
-            0.0
-        };
-        let mut vertical:f32 = if keyboard_input.pressed(KeyCode::Down) {
-            -1.
-        } else if keyboard_input.pressed(KeyCode::Up) {
-            1.
-        } else {
-            0.0
-        };
-
-        horizontal = simple_fly.current_horizontal.lerp(horizontal,simple_fly.follow*time.delta_seconds());
-        vertical = simple_fly.current_vertical.lerp(vertical,simple_fly.follow*time.delta_seconds());
-
-        simple_fly.yaw += horizontal * yaw_amount * time.delta_seconds();
-        simple_fly.yaw = simple_fly.yaw.clamp(-0.9,0.9);
-        simple_fly.pitch += vertical * pitch_amount * time.delta_seconds();
-        simple_fly.pitch = simple_fly.pitch.clamp(-0.9,0.9);
-
-        transform.rotation = Quat::from_euler( EulerRot::YXZ,
-                                               simple_fly.yaw,
-                                               simple_fly.pitch,
-                                               simple_fly.yaw);
-
-        simple_fly.current_horizontal = horizontal;
-        simple_fly.current_vertical = vertical;
-    }
-}
-
 const MAX_LASER:i32=10;
 
 fn spawn_laser(
+    mut event_create_laser: EventReader<CreateLaserEvent>,
     mut count_laser: ResMut<CountLaser>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    keyboard_input:Res<Input<KeyCode>>,
     query: Query<&Transform, With<Ship>>
 )
 {
-    if keyboard_input.just_pressed(KeyCode::Space) {
+    for _ in event_create_laser.iter() {
         let ship_transform = query.single();
         if count_laser.value <= MAX_LASER {
             count_laser.value += 1;
-            commands.spawn_bundle(PbrBundle {
+            commands.spawn(PbrBundle {
                 mesh: meshes.add(Mesh::from(shape::Box::new(0.1, 0.1, 1.6))),
                 material: materials.add(StandardMaterial {
                     base_color: Color::LIME_GREEN,
@@ -443,7 +434,7 @@ fn spawn_laser(
                 }),
                 transform: Transform {
                     translation: ship_transform.translation,
-                    rotation: ship_transform.rotation,
+                    rotation: ship_transform.rotation.clone(),
                     scale: Vec3::new(1.0, 1.0, 1.0)
                 },
                 ..Default::default()
@@ -455,7 +446,7 @@ fn spawn_laser(
                                          0.1/2.0,
                                          1.6/2.0))
                 .insert(Velocity {
-                    linvel: ship_transform.forward()*48.0,
+                    linvel: ship_transform.forward()*84.0,
                     ..Default::default()
                 })
                 .insert(Laser);
@@ -497,7 +488,7 @@ fn create_effect(
             for y in 0..2 {
                 for z in -2..2 {
                     commands
-                        .spawn_bundle(PbrBundle {
+                        .spawn(PbrBundle {
                             mesh: meshes.add(Mesh::from(shape::Box::new(0.1, 0.1, 0.1))),
                             material: materials.add(StandardMaterial {
                                 metallic: 0.5,
@@ -521,7 +512,7 @@ fn create_effect(
                             torque_impulse: Vec3::new(0.0, 0.0, 0.0),
                         })
                         .insert(EffectTime{
-                            timer: Timer::from_seconds(EFFECT_TIME,false)
+                            timer: Timer::from_seconds(EFFECT_TIME,TimerMode::Once)
                         })
                         .insert(Sleeping::disabled())
                         .insert(Collider::cuboid(0.1 / 2.0, 0.1 / 2.0, 0.1 / 2.0));
@@ -547,7 +538,7 @@ fn remove_effect(
 
 fn collision(
     mut collision_events: EventReader<CollisionEvent>,
-    mut state: ResMut<State<GameState>>,
+    mut state: ResMut<NextState<GameState>>,
     mut next_card_position:ResMut<NextCardPosition>,
     mut talon:ResMut<Talon>,
     mut stack: ResMut<Stack>,
@@ -580,7 +571,7 @@ fn collision(
                                     card_transform.translation = next_card_position.position.clone();
                                     next_card_position.position.x += 1.0;
                                     if stack.current == GAMEOVER {
-                                        state.set(GameState::GameOver).unwrap();
+                                        state.set(GameState::GameOver);
                                     }
                                 } else {
                                     talon.cards.push(card.text.clone());
@@ -643,12 +634,12 @@ fn spawn_card(
         ..Default::default()
     });
 
-    commands.spawn_bundle(PbrBundle {
+    commands.spawn(PbrBundle {
         mesh: card_quad_handle.clone(),
         material: card_material_handle,
         transform: Transform {
             translation: SHIP_POSTION.clone()+Vec3::new(rng.gen_range(-CARD_LIMIT_X..CARD_LIMIT_X),
-                                                        8.0,
+                                                        10.0,
                                                         -16.0),
             ..Default::default()
         },
@@ -699,7 +690,7 @@ fn despawn_card(
 }
 
 fn any_key_pressed(
-    mut state: ResMut<State<GameState>>,
+    mut game_state: ResMut<NextState<GameState>>,
     mut key_event: EventReader<KeyboardInput>,
 ) {
     use bevy::input::ButtonState;
@@ -709,7 +700,7 @@ fn any_key_pressed(
             ButtonState::Pressed => {
             }
             ButtonState::Released => {
-                state.set(GameState::Playing).unwrap();
+                game_state.set(GameState::Playing);
             }
         }
     }
@@ -732,7 +723,7 @@ fn setup_gameover(
     if time < score.best {
         score.best = time;
     }
-    commands.spawn_bundle(TextBundle {
+    commands.spawn(TextBundle {
         text: Text::from_section(
             " Game over \n \
                     \n \
@@ -759,7 +750,7 @@ fn setup_gameover(
 }
 
 fn any_key_pressed_gameover(
-    mut state: ResMut<State<GameState>>,
+    mut game_state: ResMut<NextState<GameState>>,
     mut key_event: EventReader<KeyboardInput>,
 ) {
     use bevy::input::ButtonState;
@@ -769,7 +760,7 @@ fn any_key_pressed_gameover(
             ButtonState::Pressed => {
             }
             ButtonState::Released => {
-                state.set(GameState::GameStart).unwrap();
+                game_state.set(GameState::GameStart);
             }
         }
     }
@@ -786,4 +777,39 @@ fn exit_gameover(
     commands.remove_resource::<Talon>();
     commands.remove_resource::<NextCardPosition>();
     commands.remove_resource::<Stack>();
+}
+
+fn update_raycast_with_cursor(
+    mut cursor: EventReader<CursorMoved>,
+    mut query: Query<&mut RaycastSource<MyRaycastSet>>,
+) {
+    // Grab the most recent cursor event if it exists:
+    let cursor_position = match cursor.iter().last() {
+        Some(cursor_moved) => cursor_moved.position,
+        None => return,
+    };
+
+    for mut pick_source in &mut query {
+        pick_source.cast_method = RaycastMethod::Screenspace(cursor_position);
+    }
+}
+
+fn mouse_button_input(
+    buttons: Res<Input<MouseButton>>,
+    mut event_create_laser: EventWriter<CreateLaserEvent>,
+    mut query_ship: Query<&mut Transform, With<Ship>>,
+    query: Query<&RaycastSource<MyRaycastSet>>
+) {
+    if buttons.just_released(MouseButton::Left) {
+        for pick_source in query.iter() {
+            let mut position = match pick_source.get_nearest_intersection() {
+                Some((_, intersection)) => intersection.position(),
+                None => return,
+            };
+            let mut ship_transform = query_ship.single_mut();
+            let transform = ship_transform.looking_at(position, Vec3::Y);
+            ship_transform.rotation = transform.rotation.clone();
+            event_create_laser.send(CreateLaserEvent);
+        }
+    }
 }
